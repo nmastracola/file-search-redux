@@ -1,0 +1,6 @@
+# exclude the following
+/node_modules/*
+/config/config.js
+/logs/*
+/logs/.DS_Store
+*.csv
