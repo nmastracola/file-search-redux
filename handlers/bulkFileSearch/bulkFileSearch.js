@@ -1,16 +1,14 @@
 const { prompt }        = require('enquirer');
 const cli               = require("./cli-questions")
 const chalk             = require('chalk')
-const config            = require ("../../config/config")
-const token             = config.token
+const tconfig           = require ("../../config/config")
+const token             = tconfig.token
 const axios             = require('axios')
-const Bottleneck             = require('bottleneck')
+const Bottleneck        = require('bottleneck')
 const fs                = require("fs");
 const csv               = require('csvtojson');
 const parse             = require('parse-link-header')
 const log               = console.log
-const _cliProgress      = require('cli-progress')
-const csvStrings        = `./logs/bulkFind/input/strings`
 const csvCourses        = `./logs/bulkFind/input/courses`
 const csvOutput         = `./logs/bulkFind/bulk-output.csv`;
 const csvFailed         = `./logs/bulkFind/bulk-failed.csv`;
@@ -20,35 +18,35 @@ const csvFailed         = `./logs/bulkFind/bulk-failed.csv`;
 //TO DO: Multithreading
 
 const limiter = new Bottleneck({
-  maxConcurrent: 1,
-  minTime: 333
+  minTime: 222
 })
 
-const bulk = ( answers ) => {
+
+const bulk = (answers) => {
   prompt(cli.bulkQuestions).then(answers => {
     if(answers.csv_upload_confirm) {
       fs.readdir(csvCourses, (err, files) => {
         files.forEach(file => {
           let inputCrsFilePath = `${csvCourses}/${file}`
-            fs.readdir(csvStrings, (err, files) => {
-              files.forEach(file => {
-                csv(answers)
-                  .fromFile(inputCrsFilePath)
-                  .then(async (courses) => { //ASYNC THIS FOR ALL THAT IS HOLY
-                    for await (const course of courses) {
-                      answers.courseNumber = course.canvas_course_id
-                      fileGet(answers)
-                    }
-                })
-              })
-            })
+            csv(answers)
+            .fromFile(inputCrsFilePath)
+            .then(async (courses) => { //ASYNC THIS FOR ALL THAT IS HOLY
+              for await (let course of courses) {
+                answers.courseNumber = course.canvas_course_id
+                fileGet(answers)
+              }
+          })
         })
       })
     } else {
-      console.log(`\n\nPlease place the input files in ${csvCourses} and ${csvStrings} and run the script again`)
+      console.log(`\n\nPlease place the input files in ${csvCourses} and run the script again`)
       process.exit
     }
   })
+}
+
+var gconfig = {
+  headers: {'Authorization': `Bearer ${token}`},
 }
 
 const hLP = (link) => {
@@ -56,20 +54,18 @@ const hLP = (link) => {
   return p
 }
 
-const config = {
-  method: 'GET',
-  headers: {'Authorization': `Bearer ${token}`},
-}
-
 async function fileGet(answers) { 
 
-  let domain          = answers.domain
-  let courseNumber    = answers.courseNumber
-  let searchString    = answers.search_string
+  var domain          = answers.domain
+  var courseNumber    = answers.courseNumber
+  var searchString    = answers.search_string
 
   let init = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/files?search_term=${searchString}&per_page=100&only[]=names`
   
-  function listGet ({url, payload = [], resolver = null}, config) {
+  function listGet ({url, payload = [], resolver = null}) {
+    const config = {
+      headers: {'Authorization': `Bearer ${token}`},
+    }
     return new Promise((resolve, reject) => {
       axios.get(url, config)
       .then(res => {
@@ -93,13 +89,13 @@ async function fileGet(answers) {
           return
         }
       })
-      .catch(err => {
-        console.error('this error', err)
+      .catch(error => {
+        console.error(chalk.hex("#D8000C")('Your error is: ', error.response.data.message))
       })
     })
   }
 
-  listGet({url: init}, config)
+  listGet({url: init})
   .then(data => {
     id_list = data.map(function(item){
       id = item.id
@@ -112,15 +108,15 @@ async function fileGet(answers) {
     initDisc = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/discussion_topics?per_page=100`
     initAssign = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/assignments?per_page=100`
     async function page_lister (initPage) {
-      page_list = await listGet({url: initPage}, config)
+      page_list = await listGet({url: initPage})
       return page_list
     }
     async function disc_lister (initDisc) {
-      disc_list = await listGet({url: initDisc}, config)
+      disc_list = await listGet({url: initDisc})
       return disc_list
     }
     async function assign_lister (initAssign) {
-      assign_list = await listGet({url: initAssign}, config)
+      assign_list = await listGet({url: initAssign})
       return assign_list
     }
     const courseObj = {
@@ -130,85 +126,87 @@ async function fileGet(answers) {
     }
     return courseObj
   })
-  .then(courseObj => {
-    // log(id_list.length)
-    // log(courseObj.pages.length)
-    log(courseObj.discs)
-    // log(courseObj.assign.length)
+  .then(async courseObj => {
+    let pages = courseObj.pages
+    let discs = courseObj.discs
+    let assign = courseObj.assign
+    await local_searcher(id_list, discs, courseNumber) //discussions
+    await local_searcher(id_list, assign, courseNumber) //assignments
+    await pages_searcher(id_list, pages, domain, courseNumber, gconfig) //pages
   })
   .catch(error => {
     console.error(error)
   })
 }
 //function for calls that don't return body text e.g. pages
-async function page_searcher (ids, items) {
+function pages_searcher (ids, items, domain, courseNumber, gconfig) {
   let files = ids
   let pages = items
-  
-  let pageUrl = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/pages/${pageId}`
-  for await (page of pages) {
-    pageId = page.id
-    
+  for (let page of pages) {
+    pageId = page.url
+    let pageUrl = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/pages/${pageId}`
+    limiter.submit(() => {
+      axios.get(pageUrl, gconfig)
+      .then((response) => {
+        let pid = response.data.page_id
+        log(`checking page: ${pid} in ${courseNumber} `)
+        if (response.data !== null) {
+          let body = response.data.body
+          let url = response.data.html_url
+          for (let file of files) {
+            let searchIndex = body.indexOf(file)
+            if (searchIndex !== -1) {
+              let searchWord = new RegExp('[^\\s"]*' + file + '[^\\s"]*', "g");
+              let matchedWords = body.match(searchWord);
+              log(chalk.hex("#E06666")(`Found "${file}" at ${url}`))
+              for (i = 0; i < matchedWords.length; i++){
+                fs.appendFile(csvOutput, `${file}, ${url}, ${matchedWords[i]}\n`, function(err) {});
+                log(chalk.hex("#E06666")(`${i+1}) ${matchedWords[i]}`))
+              }
+            }
+          }
+        }
+      })
+      .catch(function(error) {
+        console.error("you got this error: " + error)
+      })
+    })
   }
-
-
 }
 //function for calls that do return body text e.g. discussions, assignments, quizzes
-async function local_searcher (ids, items) {
-
+async function local_searcher (ids, items, courseNumber) {
+  let files = ids
+  let pages = items
+  for (page in pages) {
+    let pageId = page.id
+    if (page !== null) {
+      let body
+      if(page.message) {
+        log(`checking discussion: ${pageId} in ${courseNumber} `)
+        body = page.message
+      } else if (page.description) {
+        log(`checking assignment or quiz: ${pageId} in ${courseNumber} `)
+        body = page.description
+      }
+      let url = pages.html_url
+      for (let file of files) {
+        if (body !== undefined || null) {
+          let searchIndex = body.indexOf(file)
+          if (searchIndex !== -1) {
+            let searchWord = new RegExp('[^\\s"]*' + file + '[^\\s"]*', "g");
+            let matchedWords = body.match(searchWord);
+            log(chalk.hex("#E06666")(`Found "${file}" at ${url}`))
+            for (i = 0; i < matchedWords.length; i++){
+              fs.appendFile(csvOutput, `${file}, ${url}, ${matchedWords[i]}\n`, function(err) {});
+              log(chalk.hex("#E06666")(`${i+1}) ${matchedWords[i]}`, style.color.close))
+            }
+          }
+        }
+      }
+    }
+  }
 }
-//let searchWord = new RegExp('[^\\s"]*' + searchString + '[^\\s"]*', "g");
 
-
-
-// const files =(data, domain, courseNumber, searchString)=>{
-
-//     let files = data
-
-//     files.forEach(file=>{
-
-//         let fileId = file.id
-//         let fileUrl = `https://${domain}.instructure.com/api/v1/courses/${courseNumber}/files/${fileId}`
-
-//         let headers = {
-//             url: `${fileUrl}`,
-//             headers: {Authorization: `Bearer ${token}`}
-//         }
-
-//         throttle(function() {
-//             axios(headers).then(function(response){
-
-//                 console.log(`course ${courseNumber} -- checking file:  ${fileId}`)
-
-//                 // if(response.data.description !== null){
-
-//                     let name = response.data.display_name.toLowerCase()
-//                     let url = response.data.url
-                
-//                     // if(body !== null){
-//                         let searchIndex = name.indexOf(searchString)
-//                         if(searchIndex !== -1){
-    
-//                             let searchWord = new RegExp('[^\\s"]*' + searchString + '[^\\s"]*', "g");
-//                             let matchedWords = name.match(searchWord);
-//                             console.log(style.color.ansi16m.hex("#E06666") + `Found "${searchString}" at ${fileUrl}` + style.color.close)
-//                             var nameNoComma = name.replace(new RegExp(/,/g), "_") //get rid of the comma for the CSV
-//                             // for (i = 0; i < matchedWords.length; i++){
-//                                   fs.appendFile(csvOutput, `${searchString}, ${nameNoComma}, ${fileId}, ${fileUrl}\n`, function(err) {});
-//                                   // fs.appendFile(csvOutput, `${searchString}, ${nameNoComma}, ${fileUrl}, ${matchedWords[i]}\n`, function(err) {});
-//                                   // console.log(style.color.ansi16m.hex("#E06666"), `${i+1}) ${matchedWords[i]}`, style.color.close)
-//                             // }
-//                         }
-//                     // }
-//                 //}
-
-//             }).catch(function(error){console.log(style.color.ansi16m.hex("#EEEE66") + `files ERROR while scanning ${fileId} at: \n${fileUrl}` +  style.color.close)
-//                     fs.appendFile(csvFailed, `${searchString}, ${fileId}, ${fileUrl}, files function error\n`, function(err) {});
-//                     console.log(style.color.ansi16m.hex("#EEEE66"), error.response.data), style.color.close}
-//                     )
-//         })
-//     })
-// }
 
 
 module.exports = { bulk }
